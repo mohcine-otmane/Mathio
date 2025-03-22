@@ -3,7 +3,7 @@ import os
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QCheckBox, QPushButton, QTextEdit, 
                            QProgressBar, QLabel, QGroupBox, QScrollArea, 
-                           QFileDialog, QMessageBox)
+                           QFileDialog, QMessageBox, QGridLayout)
 from PySide6.QtCore import Qt, QThread, Signal
 from math_book_downloader import MathBookDownloader
 import logging
@@ -19,12 +19,14 @@ class LogHandler(logging.Handler):
 
 class DownloaderThread(QThread):
     progress_signal = Signal(str)
+    download_progress_signal = Signal(str, float)  # filename, progress percentage
     finished_signal = Signal(int)
     
-    def __init__(self, download_dir):
+    def __init__(self, download_dir, selected_sources):
         super().__init__()
         self.download_dir = download_dir
-        self.downloader = MathBookDownloader()
+        self.selected_sources = selected_sources
+        self.downloader = MathBookDownloader(progress_callback=self.update_progress)
         self.downloader.download_dir = download_dir
 
         # Set up logging for this thread
@@ -43,56 +45,148 @@ class DownloaderThread(QThread):
     def log_message(self, message):
         self.progress_signal.emit(message)
 
+    def update_progress(self, filename, progress):
+        self.download_progress_signal.emit(filename, progress)
+
     def run(self):
         try:
-            self.downloader.scrape_arxiv()
+            self.downloader.run(self.selected_sources)
             self.finished_signal.emit(len(self.downloader.downloaded_files))
         except Exception as e:
             self.progress_signal.emit(f"Error: {str(e)}")
             self.finished_signal.emit(0)
 
+class ProgressWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.layout = QVBoxLayout(self)
+        self.progress_bars = {}
+        self.setLayout(self.layout)
+
+    def update_progress(self, filename, progress):
+        if filename not in self.progress_bars:
+            # Create new progress bar group
+            group = QWidget()
+            group_layout = QVBoxLayout(group)
+            group_layout.setContentsMargins(0, 0, 0, 0)
+            group_layout.setSpacing(2)
+            
+            label = QLabel(f"Downloading: {filename}")
+            progress_bar = QProgressBar()
+            progress_bar.setMinimum(0)
+            progress_bar.setMaximum(100)
+            
+            group_layout.addWidget(label)
+            group_layout.addWidget(progress_bar)
+            
+            self.layout.addWidget(group)
+            self.progress_bars[filename] = (group, progress_bar)
+        
+        # Update progress
+        _, progress_bar = self.progress_bars[filename]
+        progress_bar.setValue(int(progress))
+        
+        # Remove completed downloads after a delay
+        if progress >= 100:
+            group, _ = self.progress_bars[filename]
+            self.layout.removeWidget(group)
+            group.deleteLater()
+            del self.progress_bars[filename]
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Mathematics Document Downloader")
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(900, 700)
         
         # Create main widget and layout
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         layout = QVBoxLayout(main_widget)
         
-        # Create info section
-        info_label = QLabel(
-            "This tool downloads mathematics documents from arXiv, focusing on:"
-            "\n• Textbooks and Lecture Notes"
-            "\n• Course Materials"
-            "\n• Introductory Texts"
-            "\n\nTopics include: Topology, Algebra, Analysis, Geometry, Number Theory, "
-            "and more advanced subjects."
-        )
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("font-size: 10pt; margin: 10px;")
-        layout.addWidget(info_label)
+        # Create source selection group
+        source_group = QGroupBox("Select Document Sources")
+        source_layout = QGridLayout()
+        
+        self.source_checkboxes = {
+            'arxiv': {
+                'checkbox': QCheckBox("arXiv"),
+                'description': "Research papers, lecture notes, and academic materials",
+                'default': True
+            },
+            'open_textbook': {
+                'checkbox': QCheckBox("Open Textbook Library"),
+                'description': "Free, peer-reviewed textbooks from the University of Minnesota",
+                'default': True
+            },
+            'oer_commons': {
+                'checkbox': QCheckBox("OER Commons"),
+                'description': "Open educational resources and college-level mathematics textbooks",
+                'default': True
+            },
+            'merlot': {
+                'checkbox': QCheckBox("MERLOT"),
+                'description': "Curated collection of free and open online teaching and learning materials",
+                'default': True
+            }
+        }
+        
+        row = 0
+        for key, source_info in self.source_checkboxes.items():
+            checkbox = source_info['checkbox']
+            checkbox.setChecked(source_info['default'])
+            source_layout.addWidget(checkbox, row, 0)
+            
+            desc = QLabel(source_info['description'])
+            desc.setWordWrap(True)
+            desc.setStyleSheet("color: gray; font-size: 10pt;")
+            source_layout.addWidget(desc, row, 1)
+            row += 1
+        
+        source_group.setLayout(source_layout)
+        layout.addWidget(source_group)
         
         # Create directory selection
-        dir_layout = QHBoxLayout()
+        dir_group = QGroupBox("Download Settings")
+        dir_layout = QVBoxLayout()
+        
+        dir_selector = QHBoxLayout()
         self.dir_label = QLabel("Download Directory:")
         self.dir_path = QLabel("math_books")
         dir_button = QPushButton("Change")
         dir_button.clicked.connect(self.change_directory)
         
-        dir_layout.addWidget(self.dir_label)
-        dir_layout.addWidget(self.dir_path, stretch=1)
-        dir_layout.addWidget(dir_button)
-        layout.addLayout(dir_layout)
+        dir_selector.addWidget(self.dir_label)
+        dir_selector.addWidget(self.dir_path, stretch=1)
+        dir_selector.addWidget(dir_button)
+        dir_layout.addLayout(dir_selector)
+        
+        # Add organization info
+        org_label = QLabel(
+            "Downloads will be organized in subdirectories by source:\n"
+            "• arxiv/ - Mathematics papers and lecture notes from arXiv\n"
+            "• open_textbook/ - Free textbooks from Open Textbook Library\n"
+            "• oer_commons/ - Open educational resources from OER Commons\n"
+            "• merlot/ - Teaching and learning materials from MERLOT"
+        )
+        org_label.setStyleSheet("color: #666; font-size: 10pt; margin: 5px;")
+        dir_layout.addWidget(org_label)
+        
+        dir_group.setLayout(dir_layout)
+        layout.addWidget(dir_group)
         
         # Create progress section
         progress_group = QGroupBox("Download Progress")
         progress_layout = QVBoxLayout()
         
+        # Add progress widget for individual downloads
+        self.progress_widget = ProgressWidget()
+        progress_layout.addWidget(self.progress_widget)
+        
+        # Add log display
         self.log_display = QTextEdit()
         self.log_display.setReadOnly(True)
+        self.log_display.setMinimumHeight(200)
         
         progress_layout.addWidget(self.log_display)
         progress_group.setLayout(progress_layout)
@@ -113,8 +207,8 @@ class MainWindow(QMainWindow):
         # Add notes
         notes = [
             "Note: Downloads may take some time. Please be patient.",
-            "The tool will automatically filter for educational content.",
-            "Files will be organized by mathematical category."
+            "Files will be organized by source and mathematical category.",
+            "The downloader respects server rate limits to ensure reliable downloads."
         ]
         
         for note in notes:
@@ -137,16 +231,27 @@ class MainWindow(QMainWindow):
             self.dir_path.setText(dir_path)
 
     def start_download(self):
+        # Get selected sources
+        selected_sources = [key for key, info in self.source_checkboxes.items() 
+                          if info['checkbox'].isChecked()]
+        
+        if not selected_sources:
+            QMessageBox.warning(self, "Warning", "Please select at least one source!")
+            return
+        
         # Disable controls during download
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
+        for info in self.source_checkboxes.values():
+            info['checkbox'].setEnabled(False)
         
         # Clear previous logs
         self.log_display.clear()
         
         # Start download thread
-        self.downloader_thread = DownloaderThread(self.dir_path.text())
+        self.downloader_thread = DownloaderThread(self.dir_path.text(), selected_sources)
         self.downloader_thread.progress_signal.connect(self.log_message)
+        self.downloader_thread.download_progress_signal.connect(self.progress_widget.update_progress)
         self.downloader_thread.finished_signal.connect(self.download_finished)
         self.downloader_thread.start()
 
@@ -161,6 +266,8 @@ class MainWindow(QMainWindow):
         # Re-enable controls
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        for info in self.source_checkboxes.values():
+            info['checkbox'].setEnabled(True)
         
         if num_files > 0:
             QMessageBox.information(self, "Success", 
@@ -174,4 +281,4 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec()) 
+    sys.exit(app.exec_()) 
